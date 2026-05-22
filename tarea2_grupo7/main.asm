@@ -92,7 +92,7 @@ UnlockGPIO  bic.w   #LOCKLPM5,&PM5CTL0      ; Disable the GPIO power-on default
             nop                             ; Wait after setting interrupt bit
 
             BIS.W #CPUOFF,SR                ; Turn off the CPU
-busyWait:
+busyWait:									; Test
             nop
             JMP busyWait                    ; jump to current location '$'
             nop                             ; (endless loop)

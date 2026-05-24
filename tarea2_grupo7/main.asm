@@ -1,143 +1,266 @@
+;-------------------------------------------------------------------------------
 ; Interrupt Management Demostration
-; Program Port 1 to generate an interrupt everytime the push button
-; on the launchpad is pressed. The first time the red LED will be light on.
-; The second time the green LED will be light on. Next times will cause no
-; changes.
-; *IMPORTANT: To find the correct INT# and address specific for your
-; Micro/Launchpad open the msp430.h file and look into the file that
-; includes the interrupt.  For this case I used msp430fr69891.h in
-; C:\ti\ccs1011\ccs\ccs_base\msp430\include
-;
-; No error message if : is not used at the end of Interrupt Service
-; routine name but if not used the ISR is not executed.
+; Uses Timer_A0 to generate an interrupt every 0.5 seconds.  With this
+; interrupt green LED status is toggle so that it will light on every 1 second.
+; Button S1 generates an interrupt used to toggle CCIE in TA0CCTL0.  With this
+; the interrupt generation from Timer_A0 can be enable and disable.
 ;
 ; Author: José Navarro
-; March 20, 2021
-; Updated: November 30, 2023
-
-;-------------------------------------------------------------------------------
-; MSP430 Assembler Code Template for use with TI Code Composer Studio
-;
-;
+; November 1, 2023
 ;-------------------------------------------------------------------------------
             .cdecls C,LIST,"msp430.h"       ; Include device header file
-            
+
 ;-------------------------------------------------------------------------------
             .def    RESET                   ; Export program entry-point to
                                             ; make it known to linker.
 ;-------------------------------------------------------------------------------
             .text                           ; Assemble into program memory.
-;            .retain                         ; Override ELF conditional linking
+            .retain                         ; Override ELF conditional linking
                                             ; and retain current section.
-;            .retainrefs                     ; And retain any sections that have
+            .retainrefs                     ; And retain any sections that have
                                             ; references to current section.
 
+pos			.byte	9, 5, 3, 18, 14, 7			; Positions on the LCD
+numidx  	.byte	0, 1, 5						; The indices for the numbers on the LCD
 
-pushCount   .word 0
+			.align
+half		.byte	0							; Flag to check if half a second has passed.
+												; Used for duplicating a delay of 0.5s, to 1s
 
-
+;Define high and low byte values to generate chars J, N, F
+;Sprites			0		1		2		3		4		5		6		7		8		9
+numsH		.byte 	0xFC,	0x00,	0xDB,	0xF3,	0x67,	0xB7,	0xBF,	0xE0,	0xFF, 	0xF7
+numsL		.byte 	0x00,	0x50,  	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00
 ;-------------------------------------------------------------------------------
 RESET       mov.w   #__STACK_END,SP         ; Initialize stackpointer
 StopWDT     mov.w   #WDTPW|WDTHOLD,&WDTCTL  ; Stop watchdog timer
 
+;-------------------------------------------------------------------------------
+; Setup
+;-------------------------------------------------------------------------------
+
+
+SetupButtonsAndLEDs:
+
+	        bic.b   #0xFF,&P1SEL0           ; Set PxSel0 and PxSel1 to digital I/O
+	        bic.b   #0xFF,&P1SEL1           ; Digital I/O is the default
+	        bic.b   #0xFF,&P9SEL0
+	        bic.b   #0xFF,&P9SEL1
+
+	        mov.b   #11111001B,&P1DIR       ; Set P1.1 and P1.2 for input and all
+	                                        ; other P1 pins for output
+	        bis.b   #0xFF,&P9DIR            ; Set all P9 pins for output
+
+	        mov.b   #00000110B,&P1REN       ; Activate P1.1 and P1.2 programable
+	                                        ; pull-up/pull-down resistors and deactivate
+	                                        ; others.
+	        bis.b   #00000110B,&P1OUT       ; Set resistors for P1.1 and P1.2 as
+	                                        ; as pull-up
+	        bic.b   #0x01,&P1OUT            ; Clear P1.0 and P9.7 output latch to
+	        bic.b   #0x80,&P9OUT            ; start with both off
+
+SetupLCD:		;Initialize LCD segments 0 - 21; 26 - 43
+			MOV.W   #0xFFFF,&LCDCPCTL0
+			MOV.W   #0xfc3f,&LCDCPCTL1
+  		    MOV.W   #0x0fff,&LCDCPCTL2
+
+			;Initialize LCD_C
+  		    ;ACLK, Divider = 1, Pre-divider = 16; 4-pin MUX
+			MOV.W   #0x041e,&LCDCCTL0
+
+  		    ;VLCD generated internally,
+  		    ;V2-V4 generated internally, v5 to ground
+  		    ;Set VLCD voltage to 2.60v
+  		    ;Enable charge pump and select internal reference for it
+  		    MOV.W   #0x0208,&LCDCVCTL
+
+			MOV.W   #0x8000,&LCDCCPCTL   	;Clock synchronization enabled
+
+			MOV.W   #2,&LCDCMEMCTL       	;Clear LCD memory
+
+UnlockGPIO:
+			bic.w   #LOCKLPM5,&PM5CTL0      ; Disable the GPIO power-on default
+                                            ; high-impedance mode to activate
+                                            ; previously configured port setting
+
+			jmp 	main
+
+;-------------------------------------------------------------------------------
+; Sub-rutinas
+;-------------------------------------------------------------------------------
+
+changeTo10Hz:
+			cmp     #6250, &TA0CCR0
+			jz		finFreq
+			mov     #6250, &TA0CCR0        ; Set the timer capture compare register 0
+
+finFreq:	jmp		continueDownCounter
+
+; Objetivo: Comenzar la cuenta regresiva en el display LCD del MSP430 del numero
+;			seleccionado en el menu del conteo.
+; Parametros: R6 = 0: Se utiliza como indice interno para navegar por los tres digitos
+;					  en el LCD.
+; 			  R5: digito en la posicion de centenas (e.g. 123, R8 = 1)
+; 			  R7: digito en la posicion de decenas (e.g. 123, R7 = 2)
+;			  R8: digito en la posicion de unidades (e.g. 123, R8 = 3)
+;			  R9: frecuencia a la que deberia operar el contador (1 Hz o 10 Hz)
+; Pre-condiciones: Se asume que el LCD esta encendido, y que la frecuencia ya fue configurada.
+; Post-condiciones:
+downCounter:
+
+			call	#displayNums			; Llama a la subrutina que se encarga de aparecer los numeros
+											; en la pantalla
+
+			cmp.b	#10, R9
+			jz		changeTo10Hz
+
+continueDownCounter:
+			cmp.b	#0, R8					; Revisa si el digito en posicion de unidades es un 0. Si lo es,
+			jz		resetOnes				; salta a 'resetOnes'.
+			dec		R8						; Sino, decrementa el valor del digito en unidades, y
+			jmp		finDownCounter			; finaliza el conteo de este segundo.
+
+
+resetOnes:
+			cmp.b	#0, R7
+			jz		resetTenth
+			dec		R7
+			mov.b	#9, R8
+			jmp		finDownCounter
+resetTenth:
+			cmp.b	#0, R5
+			jz		resetHundreth
+			dec		R5
+			mov.b	#9, R7
+			mov.b	#9, R8
+			jmp 	finDownCounter
+
+resetHundreth:
+			mov.b	#0, R7
+			mov.b	#0, R8
+
+finDownCounter:
+			clr		R6
+			mov.b	R5, numidx(R6)
+			inc		R6
+			mov.b	R7, numidx(R6)
+			inc		R6
+			mov.b	R8, numidx(R6)
+			clr 	R6
+
+			ret
+
+displayNums:
+			mov.w   #2,&LCDCMEMCTL       	; Clear LCD memory so that there aren't multiple nums on the screen
+
+			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
+  		    mov.b   numsH(R5),0x0a20(R14)	; Displays the highbyte on the LCD
+	        mov.b   numsL(R5),0x0a21(R14)	; Displays the lowbyte on the LCD
+			inc		R6
+
+			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
+  		    mov.b   numsH(R7),0x0a20(R14)	; Displays the highbyte on the LCD
+	        mov.b   numsL(R7),0x0a21(R14)	; Displays the lowbyte on the LCD
+			inc		R6
+
+			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
+  		    mov.b   numsH(R8),0x0a20(R14)	; Displays the highbyte on the LCD
+	        mov.b   numsL(R8),0x0a21(R14)	; Displays the lowbyte on the LCD
+			clr		R6
+
+			ret
+;-------------------------------------------------------------------------------
+; Interrupt Service Routines (ISRs)
+;-------------------------------------------------------------------------------
+
+TIMER_A0_ISR:
+
+			cmp.b	#1, &half				; Check if it already passed 0.5 seconds.
+			jnz		fin						; If not, end the ISR and toggle the half flag.
+
+			call 	#downCounter
+
+fin:
+			xor.b	#1, &half				; Toggles the half flag to indicate that
+											; the number should not change yet.
+      	  	reti
+
+PORT1_ISR:
+		    bic.b   #00000010b, &P1IFG  	; Reset interrupt flag
+		   	nop
+		    xor     #CCIE, &TA0CCTL0		; Desactiva las interrupciones del timer A si estan activadas,
+		    								; si estan desactivadas, las activa.
+		    nop
+
+		    reti
 
 ;-------------------------------------------------------------------------------
 ; Main loop here
 ;-------------------------------------------------------------------------------
-            mov.b   #0FFh,&P2DIR            ; All pins on P1 & P2 for output except for
-            mov.b   #0FDh,&P1DIR            ; for push button
-            mov.b   #0FFh,&P9DIR            ; All pins on P9 for output
+main:	   	NOP                             ; main program
+	        MOV.W   #WDTPW+WDTHOLD,&WDTCTL  ; Stop watchdog timer
 
+	        bis.b   #02h, &P1IES            ; Int generated on high to low transition
+	        bis.b   #02h, &P1IE             ; Enable interrupt at P1.1
 
-            bic.b   #10000000b, &P9OUT      ; Turn off green LED on P9.7
-            bic.b   #00000001b, &P1OUT      ; Turn off red LED on P1.0
+	        mov     #CCIE, &TA0CCTL0        ; Enable TACCR0 interrupt
 
-            bic.b   #00000011b, &P1SEL0     ; For each port pin, a 0 on both PxSEL0 and PxSEL1
-            bic.b   #00000011b, &P1SEL1     ; indicates that it will be uses as digital I/O.
-            bic.b   #10000000b, &P9SEL0     ; 00 for P1.1, P1.0 and P9.7 indicates that button S1,
-            bic.b   #10000000b, &P9SEL1     ; red LED and green LED respectively will be set for
-                                            ; digital I/O
+	        mov     #TASSEL_2+MC_1+ID_3, &TA0CTL  ;Set timer according to next table
+	   		nop
+	        ; Uses SMCLK and up mode
+	        ; TASSELx        MCx (mode control)                IDx (input divider)
+	        ; 00 -> TACLK    00 -> Stop                        00 -> /1
+	        ; 01 -> ACLK     01 -> Up mode (up to TACCR0)      01 -> /2
+	        ; 10 -> SMCLK    10 -> Continuous (up to 0FFFFh)   10 -> /4
+	        ; 11 -> INCLK    11 -> Up/down (top on TACCR0)     11 -> /8
 
-                                                                  ;
-            bis.b   #02h, &P1OUT
-            bis.b   #02h, &P1REN            ; P1.1 Resistor enabled as pullup
-                                            ; resistor
-            bis.b   #02h, &P1IES            ; Int generated on high to low transition
-            bic.b   #02h, &P1IFG            ; Because previous instruction can (terrible) set int flag
-            bis.b   #02h, &P1IE             ; Enable interrupt at P1.1
+	        ; period = cycles * divider / SMCLK
+	        ; Assuming SMCLK = 1 MHz, divider = 8 and period = 0.5 seg
+	        ; cycles = 62500.  With period = 0.5 LED turn on every 1 second
+	        mov     #62500, &TA0CCR0        ; Set the timer capture compare register 0
 
-UnlockGPIO  bic.w   #LOCKLPM5,&PM5CTL0      ; Disable the GPIO power-on default
-                                            ; high-impedance mode to activate
-                                            ; previously configured port settings
+	        bic.b   #0000010b, &P1IFG       ; To erase a flag raised before
+	                                        ; activating the GIE. This help to
+	                                        ; avoid responding to a push on button
+	                                        ; previous to program start.
 
-            mov     #0, pushCount           ; When using reload with the debugger
-                                            ; the memory content is not reset to
-                                            ; original values. To take care of
-                                            ; that situation pushCount is reset
-                                            ; to 0
+	        nop             ; required befor enabling interrupts
 
-            bic.b   #0000010b, &P1IFG       ; To erase a flag raised before
-                                            ; activating the GIE. This help to
-                                            ; avoid responding to a push on button
-                                            ; previous to program start.
-                                            ; Already cleared in a previous instruction.
-                                            ; Just showing another option
+	        ;bis     #GIE+LPM0, SR           ; Enable interrupts and enter Low Power mode 0
+	        bis		#GIE, SR				; that doesn't disable timers
+	        nop                             ; Required after enabling interrupts
 
-            nop                             ; Required befor setting interrupt bit
+initPreconditions:
+			clr		R6						; Reset R6 so it starts at 0
+			mov.b	numidx(R6), R5			; Moving the first number (hundreth place) into R5
+			inc		R6						; Increase R6
+			mov.b	numidx(R6), R7			; Move the second number (tenth place) into R7
+			inc		R6						; Increase R6
+			mov.b	numidx(R6), R8			; Move the third number (oneth place) into R8
+			clr 	R6						; Reset R6 to 0
 
-            bis.w   #GIE,SR                 ; Interrupts enabled (same as eint)
-                                            ; so that the micro reacts to
-                                            ; interrupts
+			mov.b 	#10, R9					; Set frequency to 10
 
-            nop                             ; Wait after setting interrupt bit
+			bis.w   #1, &LCDCCTL0			; Turn on LCD
 
-            BIS.W #CPUOFF,SR                ; Turn off the CPU
-busyWait:									; Test
-            nop
-            JMP busyWait                    ; jump to current location '$'
-            nop                             ; (endless loop)
+	        jmp $                           ; jump to current location '$'
+	        nop                             ; (endless loop)
 
-;Interrupt Service Routine (ISR) that will be executed when the push button
-;is pressed.
-    .sect   ".text:_isr:PORT1_ISR"          ; Name convention is just a matter of style
-    .align  2
-    .global PORT1_ISR                       ; In case you reference it from another file
-
-PORT1_ISR:
-            bit.b   #00000010b, &P1IFG      ; Test P1IFG to detect if there is
-                                            ; an interrupt generated by P1.3
-                                            ; that corresponds to push button
-
-            jz      falseAlarm              ; if no interrupt from push button
-
-            bic.b   #00000010b, &P1IFG      ; to check if it is the first time
-            cmp     #0, pushCount           ; the button was pressed. If not, go
-            jne     notFirst                ; to light on green LED
-
-            bis.b   #00000001b,&P1OUT       ; turn on red LED and
-            jmp     fin                     ; go to end of ISR
-
-notFirst:
-            bis.b   #10000000b,&P9OUT       ; light on the green LED
-
-fin:        inc     pushCount               ; Increment the pushes counter
-
-falseAlarm:
-            reti                            ; Return from interrupt
-
-                                            
 
 ;-------------------------------------------------------------------------------
 ; Stack Pointer definition
 ;-------------------------------------------------------------------------------
             .global __STACK_END
             .sect   .stack
-            
+
 ;-------------------------------------------------------------------------------
 ; Interrupt Vectors
 ;-------------------------------------------------------------------------------
-            .sect   ".int37"    ; Port1 Interrupt vector (FFDA).
-            .short  PORT1_ISR
             .sect   ".reset"                ; MSP430 RESET Vector
             .short  RESET
-            .end
+            .sect   ".int37"
+            .short  PORT1_ISR
+            .sect   ".int44"
+            .short  TIMER_A0_ISR
+            .END
+

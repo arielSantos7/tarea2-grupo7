@@ -1,68 +1,68 @@
 ;-------------------------------------------------------------------------------
-; Interrupt Management Demostration
-; Uses Timer_A0 to generate an interrupt every 0.5 seconds.  With this
-; interrupt green LED status is toggle so that it will light on every 1 second.
-; Button S1 generates an interrupt used to toggle CCIE in TA0CCTL0.  With this
-; the interrupt generation from Timer_A0 can be enable and disable.
+; Cronometro Multibase
+; [Descripcion]
 ;
-; Author: José Navarro
-; November 1, 2023
+; Autores: Ariel J Santos, ...
+; 29 de mayo de 2026
 ;-------------------------------------------------------------------------------
-            .cdecls C,LIST,"msp430.h"       ; Include device header file
+            .cdecls C,LIST,"msp430.h"       	; Include device header file
 
 ;-------------------------------------------------------------------------------
-            .def    RESET                   ; Export program entry-point to
-                                            ; make it known to linker.
+            .def    RESET                   	; Export program entry-point to
+                                            	; make it known to linker.
 ;-------------------------------------------------------------------------------
-            .text                           ; Assemble into program memory.
-            .retain                         ; Override ELF conditional linking
-                                            ; and retain current section.
-            .retainrefs                     ; And retain any sections that have
-                                            ; references to current section.
+            .text                           	; Assemble into program memory.
+            .retain                         	; Override ELF conditional linking
+                                            	; and retain current section.
+            .retainrefs                     	; And retain any sections that have
+                                            	; references to current section.
 
-pos			.byte	9, 5, 3, 18, 14, 7			; Positions on the LCD
-numidx  	.byte	0, 1, 5						; The indices for the numbers on the LCD
+pos			.byte	9, 5, 3, 18, 14, 7			; Offsets de las posiciones de los numeros en el LCD
+numidx  	.byte	0, 6, 7						; Digitos mostrados en la pantalla para el conteo regresivo
 
 			.align
-half		.byte	0							; Flag to check if half a second has passed.
-												; Used for duplicating a delay of 0.5s, to 1s
+half		.byte	0							; Valor booleano que representa si ya ha pasado un numero impar
+												; de interrupts en el timer. Se usa para duplicar el delay
+												; (e.g. de 0.5s a 1.0s)
 
-;Define high and low byte values to generate chars J, N, F
-;Sprites			0		1		2		3		4		5		6		7		8		9
+; Array de numeros utilizados para traducir un valor decimal a la combinacion de bits utilizada para mostrar los
+; numeros en el LCD
+; Numeros			0		1		2		3		4		5		6		7		8		9
 numsH		.byte 	0xFC,	0x00,	0xDB,	0xF3,	0x67,	0xB7,	0xBF,	0xE0,	0xFF, 	0xF7
 numsL		.byte 	0x00,	0x50,  	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00
 ;-------------------------------------------------------------------------------
-RESET       mov.w   #__STACK_END,SP         ; Initialize stackpointer
-StopWDT     mov.w   #WDTPW|WDTHOLD,&WDTCTL  ; Stop watchdog timer
+
+RESET       mov.w   #__STACK_END,SP         ; Inicializar 'stackpointer'
+StopWDT     mov.w   #WDTPW|WDTHOLD,&WDTCTL  ; Detener 'watchdog timer'
 
 ;-------------------------------------------------------------------------------
 ; Setup
 ;-------------------------------------------------------------------------------
 
 
-SetupButtonsAndLEDs:
+SetupButtonsAndLEDs:						; TODO: REVISAR CUALES PUERTOS SON PARA LOS LED Y
+											; DESACTIVARLOS PUESTO QUE NO SE VAN A USAR
 
-	        bic.b   #0xFF,&P1SEL0           ; Set PxSel0 and PxSel1 to digital I/O
-	        bic.b   #0xFF,&P1SEL1           ; Digital I/O is the default
+	        bic.b   #0xFF,&P1SEL0           ; Set PxSel0 y PxSel1 para 'digital I/O'
+	        bic.b   #0xFF,&P1SEL1
 	        bic.b   #0xFF,&P9SEL0
 	        bic.b   #0xFF,&P9SEL1
 
-	        mov.b   #11111001B,&P1DIR       ; Set P1.1 and P1.2 for input and all
-	                                        ; other P1 pins for output
-	        bis.b   #0xFF,&P9DIR            ; Set all P9 pins for output
+	        mov.b   #11111001B,&P1DIR       ; Set P1.1 y P1.2 para 'input' y todos los
+	                                        ; demas pins de P1 para 'output'
+	        bis.b   #0xFF,&P9DIR            ; Set todos los pins de P9 para 'output'
 
-	        mov.b   #00000110B,&P1REN       ; Activate P1.1 and P1.2 programable
-	                                        ; pull-up/pull-down resistors and deactivate
-	                                        ; others.
-	        bis.b   #00000110B,&P1OUT       ; Set resistors for P1.1 and P1.2 as
-	                                        ; as pull-up
+	        mov.b   #00000110B,&P1REN       ; Activa los resistores de 'pull-up/pull-down'para
+	        								; P1.1 y P1.2 y desactiva para los demas
+	        bis.b   #00000110B,&P1OUT       ; Set resistores para P1.1 y P1.2 como 'pull-up'
 	        bic.b   #0x01,&P1OUT            ; Clear P1.0 and P9.7 output latch to
 	        bic.b   #0x80,&P9OUT            ; start with both off
 
-SetupLCD:		;Initialize LCD segments 0 - 21; 26 - 43
-			MOV.W   #0xFFFF,&LCDCPCTL0
-			MOV.W   #0xfc3f,&LCDCPCTL1
-  		    MOV.W   #0x0fff,&LCDCPCTL2
+; Inicializar segmentos del LCD 0 - 21; 26 - 43
+SetupLCD:
+			mov.w   #0xFFFF,&LCDCPCTL0
+			mov.w   #0xfc3f,&LCDCPCTL1
+  		    mov.w   #0x0fff,&LCDCPCTL2
 
 			;Initialize LCD_C
   		    ;ACLK, Divider = 1, Pre-divider = 16; 4-pin MUX
@@ -86,15 +86,9 @@ UnlockGPIO:
 			jmp 	main
 
 ;-------------------------------------------------------------------------------
-; Sub-rutinas
+; Subrutinas
 ;-------------------------------------------------------------------------------
 
-changeTo10Hz:
-			cmp     #6250, &TA0CCR0
-			jz		finFreq
-			mov     #6250, &TA0CCR0        ; Set the timer capture compare register 0
-
-finFreq:	jmp		continueDownCounter
 
 ; Objetivo: Comenzar la cuenta regresiva en el display LCD del MSP430 del numero
 ;			seleccionado en el menu del conteo.
@@ -105,67 +99,70 @@ finFreq:	jmp		continueDownCounter
 ;			  R8: digito en la posicion de unidades (e.g. 123, R8 = 3)
 ;			  R9: frecuencia a la que deberia operar el contador (1 Hz o 10 Hz)
 ; Pre-condiciones: Se asume que el LCD esta encendido, y que la frecuencia ya fue configurada.
-; Post-condiciones:
+; Post-condiciones: Comenzara el conteo regresivo con la frecuencia seleccionada hasta llegar a 000.
+;					Una vez llegue a 0, se podria salir utilizando el boton S2. Mientras se ejecuta
+;					el conteo, se puede pausar el mismo con el boton S1, y reanudar con este mismo.
 downCounter:
 
 			call	#displayNums			; Llama a la subrutina que se encarga de aparecer los numeros
 											; en la pantalla
-
-			cmp.b	#10, R9
-			jz		changeTo10Hz
+			cmp.b	#10, R9					; Revisa si la frecuencia seleccionada es de 10 Hz, y si lo es
+			jz		changeTo10Hz			; salta a 'changeTo10Hz'.
 
 continueDownCounter:
 			cmp.b	#0, R8					; Revisa si el digito en posicion de unidades es un 0. Si lo es,
 			jz		resetOnes				; salta a 'resetOnes'.
-			dec		R8						; Sino, decrementa el valor del digito en unidades, y
+			dec		R8						; Si no, decrementa el valor del digito, y
 			jmp		finDownCounter			; finaliza el conteo de este segundo.
 
+changeTo10Hz:
+			cmp     #6250, &TA0CCR0			; Revisa si el numero de ciclos del timer corresponde al utilizado para
+											; correr a 10 Hz.
+			jz		finFreq					; Si lo es, se sale de la rutina.
+			mov     #6250, &TA0CCR0         ; Si no lo es, se cambia el numero de ciclos para que el timer vaya a 10 Hz
+
+finFreq:	jmp		continueDownCounter		; Se reanuda la subrutina de downCounter
 
 resetOnes:
-			cmp.b	#0, R7
-			jz		resetTenth
-			dec		R7
-			mov.b	#9, R8
-			jmp		finDownCounter
+			cmp.b	#0, R7					; Revisa si el digito en posicion de decenas es un 0. Si lo es,
+			jz		resetTenth				; salta a 'resetTenth'.
+			dec		R7						; Si no, decrementa el valor del digito,
+			mov.b	#9, R8					; pone un 9 en el digito de unidades, y
+			jmp		finDownCounter			; finaliza el conteo de este segundo.
 resetTenth:
-			cmp.b	#0, R5
-			jz		resetHundreth
-			dec		R5
-			mov.b	#9, R7
-			mov.b	#9, R8
-			jmp 	finDownCounter
+			cmp.b	#0, R5					; Revisa si el digito en posicion de centenas es un 0. Si lo es,
+			jz		reachedZero				; salta a 'reachedZero'.
+			dec		R5						; Si no, decrementa el valor del digito, y
+			mov.b	#9, R7					; pone un 9 en el digito de decenas,
+			mov.b	#9, R8					; pone un 9 en el digito de unidades, y
+			jmp 	finDownCounter			; finaliza el conteo de este segundo.
 
-resetHundreth:
-			mov.b	#0, R7
-			mov.b	#0, R8
+reachedZero:
+			; Enable interrupt del boton S2
+			jmp		$
+			nop
 
 finDownCounter:
-			clr		R6
-			mov.b	R5, numidx(R6)
-			inc		R6
-			mov.b	R7, numidx(R6)
-			inc		R6
-			mov.b	R8, numidx(R6)
-			clr 	R6
-
+			clr		R6						; Lleva R6 a 0 para utilizarlo como indice
 			ret
 
 displayNums:
-			mov.w   #2,&LCDCMEMCTL       	; Clear LCD memory so that there aren't multiple nums on the screen
+			mov.w   #2,&LCDCMEMCTL       	; Limpia la memoria del LCD para no tener multiples numeros
+											; uno encima del otro
 
-			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
-  		    mov.b   numsH(R5),0x0a20(R14)	; Displays the highbyte on the LCD
-	        mov.b   numsL(R5),0x0a21(R14)	; Displays the lowbyte on the LCD
+			mov.b	pos(R6), R14			; Se guarda el 'offset' de la primera posicion en el LCD.
+  		    mov.b   numsH(R5),0x0a20(R14)	; Muestra el 'highbyte' del digito en posicion de centenas en el LCD
+	        mov.b   numsL(R5),0x0a21(R14)	; Muestra el 'lowbyte' del digito en posicion de centenas en el LCD
 			inc		R6
 
-			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
-  		    mov.b   numsH(R7),0x0a20(R14)	; Displays the highbyte on the LCD
-	        mov.b   numsL(R7),0x0a21(R14)	; Displays the lowbyte on the LCD
+			mov.b	pos(R6), R14			; Se guarda el 'offset' de la segunda posicion en el LCD.
+  		    mov.b   numsH(R7),0x0a20(R14)	; Muestra el 'highbyte' del digito en posicion de decenas en el LCD
+	        mov.b   numsL(R7),0x0a21(R14)	; Muestra el 'lowbyte' del digito en posicion de decenas en el LCD
 			inc		R6
 
-			mov.b	pos(R6), R14			; Stores the offset of the postion on the LCD.
-  		    mov.b   numsH(R8),0x0a20(R14)	; Displays the highbyte on the LCD
-	        mov.b   numsL(R8),0x0a21(R14)	; Displays the lowbyte on the LCD
+			mov.b	pos(R6), R14			; Se guarda el 'offset' de la primera posicion en el LCD.
+  		    mov.b   numsH(R8),0x0a20(R14)	; Muestra el 'highbyte' del digito en posicion de unidades en el LCD
+	        mov.b   numsL(R8),0x0a21(R14)	; Muestra el 'lowbyte' del digito en posicion de unidades en el LCD
 			clr		R6
 
 			ret
@@ -175,18 +172,18 @@ displayNums:
 
 TIMER_A0_ISR:
 
-			cmp.b	#1, &half				; Check if it already passed 0.5 seconds.
-			jnz		fin						; If not, end the ISR and toggle the half flag.
+			cmp.b	#1, &half				; Revisa si ya paso un numero impar de interrupciones
+			jnz		fin						; Si no, termina la ISR, y cambia half a 'true'.
 
-			call 	#downCounter
-
+			call 	#downCounter			; Si ya paso un numero impar de interrupciones, se llama a la subrutina para
+											; contar un numero hacia abajo
 fin:
-			xor.b	#1, &half				; Toggles the half flag to indicate that
-											; the number should not change yet.
+			xor.b	#1, &half				; Cambia el valor 'booleano' half a su valor contrario.
       	  	reti
 
 PORT1_ISR:
-		    bic.b   #00000010b, &P1IFG  	; Reset interrupt flag
+		    bic.b   #00000010b, &P1IFG  	; Resetea el 'flag' de interrupcion para que no se llame indefinidamente esta
+		    								; ISR
 		   	nop
 		    xor     #CCIE, &TA0CCTL0		; Desactiva las interrupciones del timer A si estan activadas,
 		    								; si estan desactivadas, las activa.
